@@ -1,0 +1,805 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 31 10:30:52 2024
+
+@author: james.klinman
+
+5 second hail count comparison
+"""
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+import Top_Hail_Methods as hail
+import matplotlib.pyplot as plt
+import math
+import netCDF4
+from datetime import date
+import pickle
+import json
+import scipy
+
+#calling in counts files
+#----------------------
+hail1dfile = '../../yr2000/f757/disp757.0'
+hail2dfile = '../../yr2000/f757/SODA_Outputs/20240517/00_06_22_23_29_21.HAIL_V_CIRCLE.counts.1Hz'
+hailsodafile = '../../yr2000/f757/SODA_Outputs/20240517/06222000_232921_HAIL_CIRCLE.dat'
+tas_file = '../../yr2000/f757/Code_Files_and_Outputs/Sensor_Information/HHMMSS_True_Calc_Airspeed_757.txt'
+hailsodaconcfile = '../../yr2000/f757/SODA_Outputs/20240517/06222000_232921_HAIL_CIRCLE.txt'
+
+#getting flight num
+#------------------
+flight_programs_file = 'Param_Info/File_Runner_Info.txt'
+#flight_programs_info = pd.read_csv(flight_programs_file, sep=' * ', engine='python')
+with open(flight_programs_file, 'r') as file:
+    flight_programs_info = file.read()  
+flight_programs_info = json.loads(flight_programs_info)
+flight_num = str(flight_programs_info['flight_num'][0])
+
+#file running files
+#------------------
+paramInfo = 'Param_Info/' + flight_num + '_paramInfo.txt'
+indexInfo = 'Param_Info/Indexs/Flight_' + flight_num + '_Indexs.pkl'
+iteration_track_file = 'Automated_Files/Iteration_Tracker.txt'
+
+#getting path to save file
+filepath_file = 'Random/filepaths.json'
+with open(filepath_file, 'r') as file:
+    filepaths = file.read()  
+filepaths = json.loads(filepaths)
+for year in filepaths:
+    for flight in filepaths[year]:
+        if flight_num in flight:
+            path_to_flight = flight
+flightpath = path_to_flight + '/' + flight_num + '.nc'
+path_to_folder = path_to_flight + '/Code_Files_and_Outputs/'
+
+
+#true airspeed for each second
+#and airplane data for naming the tables and plots
+#-------------------------------------------------
+airplanedata = netCDF4.Dataset(flightpath)
+
+#Getting the flight data and other data for file naming and plot title making.
+#Needed up here since SODA file names require date
+#-----------------------------------------------------------------------------
+FlightNum = str(getattr(airplanedata, 'FlightNumber'))
+
+FlightDate = str(getattr(airplanedata, 'FlightDate'))
+FlightDateSplit = FlightDate.split('/')
+FlightDate = FlightDateSplit[2]+''+FlightDateSplit[0]+''+FlightDateSplit[1]
+FlightDate_File = FlightDateSplit[0]+''+FlightDateSplit[1]+''+FlightDateSplit[2]
+
+FlightTime = str(getattr(airplanedata, 'TimeInterval'))
+FlightTimeStart = str(FlightTime)[0:8]
+FlightTimeStart = FlightTimeStart.split(':')
+FlightTimeStart = FlightTimeStart[0] + FlightTimeStart[1] + FlightTimeStart[2]
+
+#duplicate method not used anywhere else i think
+plane_time_start = getattr(airplanedata, 'TimeInterval')[0:8]
+for char in plane_time_start:
+    if char == ':':
+        plane_time_start = plane_time_start.replace(':', '')
+
+TASfile = pd.read_csv(tas_file, sep=' * ', dtype={'HHMMSS': str}, engine='python')
+
+#Now can finally call concentration file names
+#---------------------------------------------
+#hail1dfile = '../../yr2000/f757/disp757.0'
+#hail2dfile = '../../yr2000/f757/SODA_Outputs/Setting_Testing/00_06_22_23_29_21.HAIL_V_XACROSS.counts.1Hz'
+
+
+#Calling start and end time before reading in the 
+#rest of the files since they're time dependent
+#------------------------------------------------
+#initParameters = pd.read_csv(paramInfo, sep=' * ', engine='python')
+with open(paramInfo, 'r') as file:
+    initParameters = file.read()  
+initParameters = json.loads(initParameters)
+
+iterationTracker = pd.read_csv(iteration_track_file, sep=' * ', engine='python')
+with open(indexInfo, "rb") as file:   # Unpickling
+   indexs = pickle.load(file)
+print(indexs)
+
+time_index_to_use = iterationTracker['Iteration'][0]# * \
+    #iterationTracker['Skip_Num'][0]
+time_index_to_use = 0                                           #to only do first one
+
+starttime = str(initParameters['Time_Start'][time_index_to_use])
+endtime = str(initParameters['Time_End'][time_index_to_use])
+timeZone = int(initParameters['Timezone_true'][0])
+
+
+#Tells the program what the chunks/number
+#of seconds to bin the data together is
+#minimum of either 1s or what SODA was set to
+#--------------------------------------------
+TimeResolution = int(initParameters['PSD_Time_Res'][0])
+
+
+#SODA defaults to a rate of 5 seconds (read as 5s chunks which is
+#related to the time resolution). So this just hardcodes that in.
+#----------------------------------------------------------------
+SodaPreChunk = 5
+
+
+#try and except because so far two variations f hail spectormeter data have
+#been run through this program. The try works if the data file is from SODA,
+#and the except works for the output generated by the South Dakota School of Mines
+#---------------------------------------------------------------------------------
+#2d file read in
+#--------------
+Spec2d = pd.read_csv(hail2dfile, sep=' * ', header=31)
+tempdf2 = pd.DataFrame(Spec2d)
+tempdf2 = tempdf2.drop(index=0)
+Spec2d = pd.DataFrame.reset_index(tempdf2)
+
+
+
+#1d file read in 
+#--------------
+strdate = FlightDateSplit[1]
+strmonth = hail.month_maker(FlightDateSplit[0])
+stryear = hail.year_maker(FlightDateSplit[2])
+finalfmt = strdate + '-' + strmonth + '-' + stryear
+
+strToDelete = ['F l i g h t  ' + flight_num + '  ' + finalfmt + '  Hail Info']                         #needs updating!!!!!!!!
+endoffiletodelete = '-=-'
+fin = open(hail1dfile, "r")
+fout = open("Random/Spec_Corrected_File", "w+")
+for line in fin:
+    for word in strToDelete:
+        line = line.replace(word, "")
+    fout.write(line)
+fin.close()
+fout.close()
+
+#first loop from https://pynative.com/python-count-number-of-lines-in-file/
+#gets length of file and get reads in just the spec data
+with open(r"Random/Spec_Corrected_File", 'r') as file:
+    for count, line in enumerate(file):
+        pass
+    FileLen = count + 1
+Spacing = 55 #spacing between rows to skip                                           #indpt var!!!!!
+RowsToSkip = []
+RowsToSkip.append(57)
+NewHeadSkip = 57
+while NewHeadSkip <= FileLen:
+    NewHeadSkip += Spacing
+    RowsToSkip.append((NewHeadSkip))
+Spec1d = "Random/Spec_Corrected_File"
+Spec1d = pd.read_csv(Spec1d, sep=' * ', header=0, skiprows=RowsToSkip)
+#spec data is stored in local time not utc. need to add 6hrs
+
+
+#soda file read in 
+#----------------
+SODAfile = scipy.io.readsav(hailsodafile)
+SpecSODA = SODAfile.data['spec1d'][0] #/5.5#second dim is time 
+
+
+def seconds_HHMMSS(time):
+    #takes interger values, not strings. idk if floats work
+    HH = str(math.floor(time/3600))
+    temp = time % 3600
+    MM = str(math.floor((temp/60)))
+    SS = str(temp%60)
+    #print(HH, MM, SS)
+    if len(HH) != 2:
+        if len(HH) == 1:
+            HH = str(0) + HH
+        else:
+            HH =' 00'
+    if len(MM) != 2:
+        if len(MM) == 1:
+            MM = str(0) + MM
+        else:
+            MM =' 00'
+    if len(SS) != 2:
+        if len(SS) == 1:
+            SS = str(0) + SS
+        else:
+            SS =' 00'
+    return str(HH+MM+SS)
+
+def HHMMSS_adjustHH(time, adjust_amount):
+     #changes the HH value by the amount specified
+     newhour = int(str(time)[0:2]) + adjust_amount
+     newtime = str(newhour) + str(time)[2:6]
+     return newtime
+
+def forceHHMMSS(data):
+    if type(data) is int or type(data) is str:
+        if len(str(data)) != 6:
+            if len(str(data)) == 5:
+                HHMMSS = '0' + str(data)
+            if len(str(data)) == 4:
+                HHMMSS = '00' + str(data)
+            if len(str(data)) == 3:
+                HHMMSS = '000' + str(data)
+            if len(str(data)) == 2:
+                HHMMSS = '0000' + str(data)
+            if len(str(data)) == 1:
+                HHMMSS = '00000' + str(data)
+        elif len(str(data)) == 6:
+            HHMMSS =str(data)
+        return HHMMSS
+    elif type(data) is list:
+        datalist = []
+        for entry in data:
+            if type(entry) is int or type(entry) is str:
+                if len(str(entry)) != 6:
+                    if len(str(entry)) == 5:
+                        HHMMSS = '0' + str(entry)
+                        datalist.append(HHMMSS)
+                    if len(str(entry)) == 4:
+                        HHMMSS = '00' + str(entry)
+                        datalist.append(HHMMSS)
+                    if len(str(entry)) == 3:
+                        HHMMSS = '000' + str(entry)
+                        datalist.append(HHMMSS)
+                    if len(str(entry)) == 2:
+                        HHMMSS = '0000' + str(entry)
+                        datalist.append(HHMMSS)
+                    if len(str(entry)) == 1:
+                        HHMMSS = '00000' + str(entry)
+                        datalist.append(HHMMSS)
+                elif len(str(entry)) == 6:
+                    HHMMSS =str(entry)
+                    datalist.append(HHMMSS)
+        return datalist
+ 
+def HHMMSS_2_SS(time):
+    #Assumes HHMMSS format. No Decimal. No colons. Should be str
+    #assumes time is a string of a value
+    
+    HH = (int(time[0:2]) * 3600)#get HH and converts to sec
+    MM = (int(time[2:4]) * 60)
+    SS = (int(time[4:6]))
+    time_sec = HH + MM + SS
+
+    return(time_sec)
+
+def find_index_of_closest_value(array, valueToFind):
+    differences = np.abs(array - valueToFind)
+    closest_index = differences.argmin()
+    return closest_index
+    
+#spec2d from seconds to HHMMSS format
+#Also SODA spec sec to HHMMSS
+#---------------------------------------------
+spec2dTimeConv = []
+for x in Spec2d['Time']:
+    spec2dTimeConv.append(seconds_HHMMSS(int(float(x))))
+
+SODAspec_timeconv = []
+for x in SODAfile.data['time'][0]:
+    SODAspec_timeconv.append(seconds_HHMMSS(int(float(x))))
+
+
+#Now to get the interseting time periods
+#---------------------------------------
+#!NOTE
+#this assumes no flights started after 2:59 UTC because of the > 3
+#the adjustment is just making sure that the time didn't go back to 0 hours
+#after 24hrs since the HVPS and spec data need it to be in the 24+ hr format
+#----------------------------------------------
+adjustHH = 0
+if int(airplanedata['TIME_HOURS_20Hz'][0][0]) > 3:
+    if starttime[0:2] == '00':
+        adjustHH = 24
+    elif int(starttime[0:2]) <= 3:
+        adjustHH = 24
+    else:
+        adjustHH = 0
+
+starttime_adjust = HHMMSS_adjustHH(starttime, adjustHH)
+endtime_adjust = HHMMSS_adjustHH(endtime, adjustHH)
+starttime_adjust = forceHHMMSS(starttime_adjust)
+endtime_adjust = forceHHMMSS(endtime_adjust)
+
+
+#Getting the start and end index for the 2d data and soda
+#-------------------------------------------------
+twod_time = [float(item) for item in spec2dTimeConv]
+twod_time = np.array(twod_time)
+
+Spec2dstart = find_index_of_closest_value(twod_time, float(starttime_adjust))
+Spec2dend = find_index_of_closest_value(twod_time, float(endtime_adjust))
+
+#checking if starttime needs to change because of soda 5sec chunking
+if str(int(float(Spec2d['Time'][Spec2dstart]))) != str(int(float(starttime_adjust))):
+    #conv to seconds ince hh and mm and ss are not normal 100
+    starttime_sec = HHMMSS_2_SS(starttime_adjust)
+    endtime_sec = HHMMSS_2_SS(endtime_adjust)
+    spectime_sec = int(float(Spec2d['Time'][Spec2dstart]))
+    time_offset = starttime_sec - spectime_sec
+    starttime_adjust = starttime_sec - time_offset
+    endtime_adjust = endtime_sec - time_offset
+    starttime_adjust = seconds_HHMMSS(starttime_adjust)
+    endtime_adjust = seconds_HHMMSS(endtime_adjust)
+
+soda_time = [float(item) for item in SODAspec_timeconv]
+soda_time = np.array(soda_time)
+
+SODAstart = find_index_of_closest_value(soda_time, float(starttime_adjust))
+SODAend   = find_index_of_closest_value(soda_time, float(endtime_adjust))
+
+#Getting the start and end index for disp file 1d
+#-----------------------------------------------
+Spec1dStartTimeIndx = None
+Spec1dEndTimeIndx = None
+tempiter = 0
+for x in Spec1d['Time']:
+    if x == '-=-': #this means you're at the end of the file
+        break
+    if str(int(float(x))) == str(starttime_adjust): #need starttimeSPec if its 1995, but adjust if it's 2000   .....
+        Spec1dStartTimeIndx = tempiter
+    if str(int(float(x))) == str(endtime_adjust):
+        Spec1dEndTimeIndx = tempiter
+        break
+    else:
+        tempiter +=1
+
+
+
+
+
+
+#now for pulling hail counts and making file
+#first need to pull 2d and have time conv
+#then need to add up the 5 seconds of 1d data 
+#then need to put them both in the same time slot and
+#    do channel by channel
+#    which will probably be a mildly intricate loop
+
+
+#first, to chunk together the 1d data
+#----------------------------------
+#Initializing arrays to store the binned data    
+#Makes the empty lists to store the data in
+
+array_len = math.ceil((Spec1dEndTimeIndx - Spec1dStartTimeIndx) / 5)
+spec1d_chunks = np.zeros((array_len, 14), dtype=int)
+chunk_tracker = 0
+second_tracker = 0
+for indexes in range(Spec1dStartTimeIndx, Spec1dEndTimeIndx): 
+    #now we're into each row
+    array_binnum = 0 #the array we're making starts with 0 but the channels start with 1
+    for binnum in range(1, 14):
+        #now we;re looping through each bin
+        spec1d_chunks[chunk_tracker, array_binnum] = \
+            spec1d_chunks[chunk_tracker, array_binnum] + \
+                int(Spec1d[str(binnum)][indexes]) #hail counts should be int anyways
+        array_binnum += 1
+    #print(spec1d_chunks[chunk_tracker], chunk_tracker, 'sum check')
+    #second tracker counts up to 5 and then if 5 is met then it goes to new array
+    second_tracker += 1   
+
+    if second_tracker == 5: #is 5 sec chunks since soda did 5 seconds
+        second_tracker = 0
+        chunk_tracker += 1
+        
+    if indexes == Spec1dEndTimeIndx:
+        if second_tracker != 0:
+            print('seconds in final bin are', second_tracker)
+
+
+#applying corrections to the soda spec counts
+#
+#so the 1d counts are the sum of the 2d counts, and the 1d counts
+#are what adpaa pulls out. aaron then applies a activation time
+#adjustment and a correction to the data. this is why the soda
+#counts->conc are different than what we get out of ADPAA and
+#is why the soda conc outputs from here will be different than
+#for the adpaa conc.
+#----------------------------------------------------------------
+array_len = SODAend - SODAstart
+specSODA_nparray = np.zeros((array_len, 14), dtype=float)
+
+row_counter = 0
+for indexes in range(SODAstart, SODAend):
+    #now we're into each row
+    array_binnum = 0 #the array we're making starts with 0 but the channels start with 1
+    for binnum in range(0, 13):
+        #now we;re looping through each channel
+        counts = int(round(SpecSODA[binnum][indexes])) #hail counts should be int anyways
+        specSODA_nparray[row_counter, array_binnum] = int(counts)
+            
+        array_binnum += 1
+    row_counter += 1
+
+activetime = SODAfile.data['activetime'][0][SODAstart:SODAend]
+corr_factor = SODAfile.data['corr_fac'][0][SODAstart:SODAend]
+
+# Extend corr_factor and activetime to match the shape of specSODA_nparray
+#got this one from chatgpt
+corr_factor_extended = np.tile(corr_factor, (specSODA_nparray.shape[1], 1)).T
+activetime_extended = np.tile(activetime, (specSODA_nparray.shape[1], 1)).T
+
+#all their shapes should be the same so it should work out to be 
+#element by element math
+corrected_SODA_counts = specSODA_nparray #/ activetime_extended#* corr_factor_extended #/ activetime_extended
+#corrected_SODA_counts = specSODA_nparray * corr_factor_extended
+rounded_SODA_counts = np.ceil(corrected_SODA_counts).astype(int)
+
+#now that data is ready time to make folderrerererewrewrer'
+#----------------------------------------------------------
+FlightNum = str(getattr(airplanedata, 'FlightNumber'))
+FlightDate = str(getattr(airplanedata, 'FlightDate'))
+FlightDate = FlightDate.split('/')
+FlightDate = FlightDate[2]+''+FlightDate[0]+''+FlightDate[1]
+
+current_date = date.today()
+file_created_date = current_date.strftime("%Y%m%d")
+
+main_pathway_table = path_to_folder + 'PSD_Tables/'
+
+main_pathway_table2 = main_pathway_table + 'Hail_Count_Comparison/'
+if os.path.exists(main_pathway_table2) is False:   
+    os.mkdir(main_pathway_table2)
+
+main_pathway_table3 = main_pathway_table2 + file_created_date
+if os.path.exists(main_pathway_table3) is False:   
+    os.mkdir(main_pathway_table3)
+
+main_pathway_table4 = main_pathway_table3 + '/' + str(FlightDate) + '/'
+if os.path.exists(main_pathway_table4) is False:   
+    os.mkdir(main_pathway_table4)
+
+pathname_tables = main_pathway_table4
+
+bin_size = np.array([.4, .5, .6, .7, .8, .94, 1.1, 1.3, 1.56, 1.86, 2.17, 2.61,\
+                   3.21, 4])
+
+#now to make the table. just gonna do two different files cause lazy
+#and thats proably the easiest way for the data to be used.
+
+
+#Making the file header
+#---------------------
+tableNameSpec1d = pathname_tables + "Spec_Counts_1D" \
+                + '_' + starttime +'-'+ \
+                  endtime +'.txt'
+filein = open(tableNameSpec1d, "w+")
+
+filein.write('{a:<9}{z:<8}{b:<8}{c:<8}{d:<8}{e:<8}{f:<8}{g:<8}{h:<8}{i:<8}'\
+             '{j:<8}{k:<8}{l:<8}{m:<8}{n:<8}{o:<8}'.format\
+               (a='Time', z='Type', b='1', c='2', d='3', e='4', f='5', g='6', \
+                h='7', i='8', j='9', k='10', l='11', m='12', n='13', o='14'))
+filein.write('\n')
+filein.write('{a:<9}{z:<8}{b:<8}{c:<8}{d:<8}{e:<8}{f:<8}{g:<8}{h:<8}{i:<8}'\
+             '{j:<8}{k:<8}{l:<8}{m:<8}{n:<8}{o:<8}'.format\
+               (a='HHMMSS',z='Method', b='.4cm', c='.5cm', d='.6cm', e='.7cm', f='.8cm',\
+                g='.94cm',h='1.1cm', i='1.3cm', j='1.56cm', k='1.86cm',\
+                l='2.17cm', m='2.61cm', n='3.21cm', o='4cm'))
+filein.write('\n\n')
+
+#filling the file with information
+#-------------------------------
+timecounter = 0
+ic = Spec2dstart #ic stands for index counter
+sc = SODAstart
+for x in range(array_len): 
+
+    indextime = Spec2dstart + timecounter
+    timecounter += 1
+    timefor2d = spec2dTimeConv[indextime]
+        
+    filein.write('{a:<9}{z:<8}{b:<8}{c:<8}{d:<8}{e:<8}{f:<8}{g:<8}{h:<8}{i:<8}'\
+                 '{j:<8}{k:<8}{l:<8}{m:<8}{n:<8}{o:<8}'.format\
+                   (z='DISP:',\
+                    a=str(timefor2d),           b=str(spec1d_chunks[x][0]),\
+                    c=str(spec1d_chunks[x][1]), d=str(spec1d_chunks[x][2]),\
+                    e=str(spec1d_chunks[x][3]), f=str(spec1d_chunks[x][4]),\
+                    g=str(spec1d_chunks[x][5]), h=str(spec1d_chunks[x][6]),\
+                    i=str(spec1d_chunks[x][7]), j=str(spec1d_chunks[x][8]),\
+                    k=str(spec1d_chunks[x][9]), l=str(spec1d_chunks[x][10]),\
+                    m=str(spec1d_chunks[x][11]), n=str(spec1d_chunks[x][12]),\
+                    o=str(spec1d_chunks[x][13])))
+    
+    filein.write('\n')
+    
+    
+    ch = 'HAILV_CH'
+    #ch= '#.'
+    filein.write('{a:<9}{z:<8}{b:<8}{c:<8}{d:<8}{e:<8}{f:<8}{g:<8}{h:<8}{i:<8}'\
+                 '{j:<8}{k:<8}{l:<8}{m:<8}{n:<8}{o:<8}'.format\
+                   (z='ADPAA:',\
+                    a=str(),                   b=str(Spec2d[ch+'1'][ic]),\
+                    c=str(Spec2d[ch+'2'][ic]), d=str(Spec2d[ch+'3'][ic]),\
+                    e=str(Spec2d[ch+'4'][ic]), f=str(Spec2d[ch+'5'][ic]),\
+                    g=str(Spec2d[ch+'6'][ic]), h=str(Spec2d[ch+'7'][ic]),\
+                    i=str(Spec2d[ch+'8'][ic]), j=str(Spec2d[ch+'9'][ic]),\
+                    k=str(Spec2d[ch+'10'][ic]), l=str(Spec2d[ch+'11'][ic]),\
+                    m=str(Spec2d[ch+'12'][ic]), n=str(Spec2d[ch+'13'][ic]),\
+                    o=str(Spec2d[ch+'14'][ic])))
+    ic += 1
+    filein.write('\n')
+    
+    filein.write('{a:<9}{z:<8}{b:<8}{c:<8}{d:<8}{e:<8}{f:<8}{g:<8}{h:<8}{i:<8}'\
+                 '{j:<8}{k:<8}{l:<8}{m:<8}{n:<8}{o:<8}'.format\
+                   (z='SODA:',\
+                    a=str(),                       b=str(rounded_SODA_counts[x][0]),\
+                    c=str(rounded_SODA_counts[x][1]), d=str(rounded_SODA_counts[x][2]),\
+                    e=str(rounded_SODA_counts[x][3]), f=str(rounded_SODA_counts[x][4]),\
+                    g=str(rounded_SODA_counts[x][5]), h=str(rounded_SODA_counts[x][6]),\
+                    i=str(rounded_SODA_counts[x][7]), j=str(rounded_SODA_counts[x][8]),\
+                    k=str(rounded_SODA_counts[x][9]), l=str(rounded_SODA_counts[x][10]),\
+                    m=str(rounded_SODA_counts[x][11]), n=str(rounded_SODA_counts[x][12]),\
+                    o=str(rounded_SODA_counts[x][13])))
+    """
+    a=str(),                     b=str(int(SpecSODA[0][sc])),\
+    c=str(int(SpecSODA[1][sc])), d=str(int(SpecSODA[2][sc])),\
+    e=str(int(SpecSODA[3][sc])), f=str(int(SpecSODA[4][sc])),\
+    g=str(int(SpecSODA[5][sc])), h=str(int(SpecSODA[6][sc])),\
+    i=str(int(SpecSODA[7][sc])), j=str(int(SpecSODA[8][sc])),\
+    k=str(int(SpecSODA[9][sc])), l=str(int(SpecSODA[10][sc])),\
+    m=str(int(SpecSODA[11][sc])), n=str(int(SpecSODA[12][sc])),\
+    o=str(int(SpecSODA[13][sc]))))
+    """
+    sc += 1
+    
+    filein.write('\n\n')
+filein.close()
+    
+    
+#
+#
+#NEED TO BUMP THE SPEC1D UP ONE BECAUSE THATS THE WAY IT IN IN SODA OR I THINK
+#I DONT KNOW UGHGHGHGHGH
+
+
+
+#accessing dat files notes
+#------------------------
+#test.data['op'][0]['endbins']  to get the stuff in op
+#test.data['tas'][0]
+#test.data['spec1d'][0]
+#SODAfile.data['CONC1D'][0][:, 578:632]   for the conc that is in the txt file
+#SODAfile.data['spec2d'][0][:, :, 582] for the counts for the 10 records that aaron does idk what they are
+#                                      but the 1d counts total this, and is in the spec1d
+#SODAfile.data['corr_fac'][0][578:632]
+
+
+
+def sdsmt_conc_simplified(data_pre_chunked,    #i am confident in my math
+                   bin_correction, surface_area, airspeed): #legacy naming convention. need to update
+    #data should be an array    
+    #now to apply math/corrections to the data to get it in
+    #units of #/m^4
+    data_pre_chunked = data_pre_chunked / bin_correction / surface_area
+    
+    #pretty sure it's good through here
+    for interval in range(data_pre_chunked.shape[0]):
+        data_pre_chunked[interval] = data_pre_chunked[interval] / airspeed[interval]
+    
+    return(data_pre_chunked)                
+            
+
+
+
+#Creating concs to compare them
+#------------------------------
+diode_size_SPEC = .0009 #.9mm to meter
+diodes_1DSPEC = 126
+diodes_2DSPEC = 64
+length_SPEC_u = .93#.93 #meters    #.99 is again a soda thing
+length_SPEC_s = .99#soda version
+Area_1DSPEC = diode_size_SPEC * diodes_1DSPEC * length_SPEC_u
+Area_2DSPEC = diode_size_SPEC * diodes_2DSPEC * length_SPEC_s
+
+bin_size_change = np.array([0.001 , 0.001 , 0.001 , 0.001 , 0.0014, 0.0016,
+                            0.002 , 0.0026, 0.003 , 0.0031, 0.0044, 0.006 , 
+                            0.0079, 0.01  ])
+
+tas_start_index = find_index_of_closest_value(TASfile['Time'], float(starttime_adjust))
+tas_end_index = find_index_of_closest_value(TASfile['Time'], float(endtime_adjust))
+
+TAS_array = []
+temp_speed = 0
+counter = 0
+for tas in range(tas_start_index, tas_end_index+1):
+    temp_speed += int(TASfile['Calc_Airspeed'][tas])
+    counter += 1
+    if counter == 5:  
+        TAS_array.append(temp_speed/5)
+        temp_speed = 0
+        counter = 0
+TAS_array = np.array(TAS_array)
+
+
+#1D Concs
+#--------
+DISPconc = sdsmt_conc_simplified(spec1d_chunks, bin_size_change, Area_1DSPEC, TAS_array)
+
+
+#ADPAA Concs 2D
+#--------------
+array_len = Spec2dend - Spec2dstart
+spec2d_seconds = np.zeros((array_len, 14), dtype=float)
+
+probetype = 'HAILV'
+ch = probetype +'_CH' #!!!hardcoded in,
+row_counter = 0
+for indexes in range(Spec2dstart, Spec2dend):
+    #now we're into each row
+    array_binnum = 0 #the array we're making starts with 0 but the channels start with 1
+    for binnum in range(1, 14):
+        #now we;re looping through each channel
+        spec2d_seconds[row_counter, array_binnum] = \
+            int(Spec2d[ch + str(binnum)][indexes]) #hail counts should be int anyways
+        array_binnum += 1
+    row_counter += 1
+
+ADPAAconc = sdsmt_conc_simplified(spec2d_seconds, bin_size_change, Area_2DSPEC, TAS_array)
+
+
+#SODA Concs also technically 2D
+#so the 1d counts are the sum of the 2d counts, and the 1d counts
+#are what adpaa pulls out. aaron then applies a activation time
+#adjustment and a correction to the data. this is why the soda
+#counts->conc are different than what we get out of ADPAA and
+#is why the soda conc outputs from here will be different than
+#for the adpaa conc.
+#---------------------------------------------------------------
+#moved up to counts section
+"""
+array_len = SODAend - SODAstart
+specSODA_nparray = np.zeros((array_len, 14), dtype=float)
+
+row_counter = 0
+for indexes in range(SODAstart, SODAend):
+    #now we're into each row
+    array_binnum = 0 #the array we're making starts with 0 but the channels start with 1
+    for binnum in range(0, 13):
+        #now we;re looping through each channel
+        specSODA_nparray[row_counter, array_binnum] = \
+            int(SpecSODA[binnum][indexes]) #hail counts should be int anyways
+        array_binnum += 1
+    row_counter += 1
+"""
+#corrected_SODA_counts
+
+#SODAconc = specSODA_nparray / Area_2DSPEC / bin_size_change
+SODAconc = corrected_SODA_counts / Area_2DSPEC / bin_size_change
+for interval in range(SODAconc.shape[0]):
+    SODAconc[interval] = SODAconc[interval] / TAS_array[interval] / activetime_extended[interval]#*corr_factor_extended[interval]#/ activetime_extended[interval]
+
+
+#SODA calculated conc from what soda calculates not me/us/we
+#-----------------------------------------------------------
+SODA_Pre_Conc = pd.read_csv(hailsodaconcfile, sep=' * ', header=22)
+tempdf2 = pd.DataFrame(SODA_Pre_Conc)
+tempdf2 = tempdf2.drop(index=0)
+SODA_Pre_Conc = pd.DataFrame.reset_index(tempdf2)
+
+SODA_conc_timeconv = []
+for x in SODA_Pre_Conc['Time']:
+    SODA_conc_timeconv.append(seconds_HHMMSS(int(float(x))))
+
+soda_conc_time = [float(item) for item in SODA_conc_timeconv]
+soda_conc_time = np.array(soda_conc_time)
+
+SODA_conc_start = find_index_of_closest_value(soda_conc_time, float(starttime_adjust))
+SODA_conc_end   = find_index_of_closest_value(soda_conc_time, float(endtime_adjust))
+
+
+array_len = SODA_conc_end - SODA_conc_start
+SODA_conc_nparray = np.zeros((array_len, 14), dtype=float)
+concname = 'Conc0'
+row_counter = 0
+for indexes in range(SODAstart, SODAend):
+    #now we're into each row
+    array_binnum = 0 #the array we're making starts with 0 but the channels start with 1
+    for binnum in range(1, 14):
+        #now we;re looping through each channel
+        if len(str(binnum)) < 2:
+            tempconc = str(concname) + '0' + str(binnum)
+        elif len(str(binnum)) < 2:
+            tempconc = str(concname) + str(binnum)
+        SODA_conc_nparray[row_counter, array_binnum] = \
+            float(SODA_Pre_Conc[tempconc][indexes]) 
+        array_binnum += 1
+    row_counter += 1
+
+#Quickly rounding everything so it fits btter
+DISPconc = np.round(DISPconc, decimals=2)
+ADPAAconc = np.round(ADPAAconc, decimals=2)
+SODAconc = np.round(SODAconc, decimals=2)
+SODA_Pre_Conc = np.round(SODA_conc_nparray, decimals=2)
+
+
+
+#Making the file header
+#---------------------
+tableNameConcs = pathname_tables + "Spec_Conc_Comp" \
+                + '_' + starttime +'-'+ \
+                  endtime +'.txt'
+filein = open(tableNameConcs, "w+")
+
+filein.write('{a:<9}{z:<8}{b:<12}{c:<12}{d:<12}{e:<12}{f:<12}{g:<12}{h:<12}{i:<12}'\
+             '{j:<12}{k:<12}{l:<12}{m:<12}{n:<12}{o:<12}'.format\
+               (a='Time', z='Type', b='1', c='2', d='3', e='4', f='5', g='6', \
+                h='7', i='8', j='9', k='10', l='11', m='12', n='13', o='14'))
+filein.write('\n')
+filein.write('{a:<9}{z:<8}{b:<12}{c:<12}{d:<12}{e:<12}{f:<12}{g:<12}{h:<12}{i:<12}'\
+             '{j:<12}{k:<12}{l:<12}{m:<12}{n:<12}{o:<12}'.format\
+               (a='HHMMSS',z='Method', b='.4cm', c='.5cm', d='.6cm', e='.7cm', f='.8cm',\
+                g='.94cm',h='1.1cm', i='1.3cm', j='1.56cm', k='1.86cm',\
+                l='2.17cm', m='2.61cm', n='3.21cm', o='4cm'))
+filein.write('\n\n')
+
+#filling the file with information
+#-------------------------------
+timecounter = 0
+for x in range(DISPconc.shape[0]): 
+    
+    #for time column
+    indextime = Spec2dstart + timecounter
+    timecounter += 1
+    timefor2d = spec2dTimeConv[indextime]
+        
+    filein.write('{a:<9}{z:<8}{b:<12}{c:<12}{d:<12}{e:<12}{f:<12}{g:<12}{h:<12}{i:<12}'\
+                '{j:<12}{k:<12}{l:<12}{m:<12}{n:<12}{o:<12}'.format\
+                   (z='DISP:',\
+                    a=str(timefor2d),      b=str(DISPconc[x][0]),\
+                    c=str(DISPconc[x][1]), d=str(DISPconc[x][2]),\
+                    e=str(DISPconc[x][3]), f=str(DISPconc[x][4]),\
+                    g=str(DISPconc[x][5]), h=str(DISPconc[x][6]),\
+                    i=str(DISPconc[x][7]), j=str(DISPconc[x][8]),\
+                    k=str(DISPconc[x][9]), l=str(DISPconc[x][10]),\
+                    m=str(DISPconc[x][11]), n=str(DISPconc[x][12]),\
+                    o=str(DISPconc[x][13])))
+    
+    filein.write('\n')
+    
+    
+    filein.write('{a:<9}{z:<8}{b:<12}{c:<12}{d:<12}{e:<12}{f:<12}{g:<12}{h:<12}{i:<12}'\
+                '{j:<12}{k:<12}{l:<12}{m:<12}{n:<12}{o:<12}'.format\
+                   (z='ADPAA:',\
+                    a=str(),                b=str(ADPAAconc[x][0]),\
+                    c=str(ADPAAconc[x][1]), d=str(ADPAAconc[x][2]),\
+                    e=str(ADPAAconc[x][3]), f=str(ADPAAconc[x][4]),\
+                    g=str(ADPAAconc[x][5]), h=str(ADPAAconc[x][6]),\
+                    i=str(ADPAAconc[x][7]), j=str(ADPAAconc[x][8]),\
+                    k=str(ADPAAconc[x][9]), l=str(ADPAAconc[x][10]),\
+                    m=str(ADPAAconc[x][11]), n=str(ADPAAconc[x][12]),\
+                    o=str(ADPAAconc[x][13])))
+
+    filein.write('\n')
+    
+    filein.write('{a:<9}{z:<8}{b:<12}{c:<12}{d:<12}{e:<12}{f:<12}{g:<12}{h:<12}{i:<12}'\
+                '{j:<12}{k:<12}{l:<12}{m:<12}{n:<12}{o:<12}'.format\
+                   (z='SODA:',\
+                    a=str(),               b=str(SODAconc[x][0]),\
+                    c=str(SODAconc[x][1]), d=str(SODAconc[x][2]),\
+                    e=str(SODAconc[x][3]), f=str(SODAconc[x][4]),\
+                    g=str(SODAconc[x][5]), h=str(SODAconc[x][6]),\
+                    i=str(SODAconc[x][7]), j=str(SODAconc[x][8]),\
+                    k=str(SODAconc[x][9]), l=str(SODAconc[x][10]),\
+                    m=str(SODAconc[x][11]), n=str(SODAconc[x][12]),\
+                    o=str(SODAconc[x][13])))
+  
+    filein.write('\n')
+    
+    filein.write('{a:<9}{z:<8}{b:<12}{c:<12}{d:<12}{e:<12}{f:<12}{g:<12}{h:<12}{i:<12}'\
+                '{j:<12}{k:<12}{l:<12}{m:<12}{n:<12}{o:<12}'.format\
+                   (z='SODA_T:',\
+                    a=str(),                    b=str(SODA_Pre_Conc[x][0]),\
+                    c=str(SODA_Pre_Conc[x][1]), d=str(SODA_Pre_Conc[x][2]),\
+                    e=str(SODA_Pre_Conc[x][3]), f=str(SODA_Pre_Conc[x][4]),\
+                    g=str(SODA_Pre_Conc[x][5]), h=str(SODA_Pre_Conc[x][6]),\
+                    i=str(SODA_Pre_Conc[x][7]), j=str(SODA_Pre_Conc[x][8]),\
+                    k=str(SODA_Pre_Conc[x][9]), l=str(SODA_Pre_Conc[x][10]),\
+                    m=str(SODA_Pre_Conc[x][11]), n=str(SODA_Pre_Conc[x][12]),\
+                    o=str(SODA_Pre_Conc[x][13])))
+        
+    filein.write('\n\n')
+filein.close()
+
+
+#
